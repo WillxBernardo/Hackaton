@@ -6,3 +6,6 @@ sentence-transformers
 unstructured
 jq
 unstructured[pdf]
+pypdf
+langchain_huggingface
+langchain_elasticsearch

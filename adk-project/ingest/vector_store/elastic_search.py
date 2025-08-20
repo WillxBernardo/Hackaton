@@ -1,7 +1,7 @@
 import os
 import base64
 import tempfile
-from typing import Optional, Tuple
+from typing import Tuple
 
 from elasticsearch import Elasticsearch
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -15,24 +15,22 @@ def _resolve_tls_kwargs() -> dict:
     ca_b64 = os.getenv("ES_CA_BASE64")
 
     if not verify:
-        # modo inseguro (sem verificar cadeia) – útil para self-signed
+        # modo inseguro (útil para CA self-signed)
         return {"verify_certs": False, "ssl_show_warn": True}
 
-    # verify=True
     if ca_path and os.path.exists(ca_path):
         return {"verify_certs": True, "ca_certs": ca_path}
 
     if ca_b64:
-        # materializa CA base64 em arquivo temporário
         pem_tmp = tempfile.NamedTemporaryFile(suffix=".pem", delete=False)
         try:
             pem_tmp.write(base64.b64decode(ca_b64))
             pem_tmp.flush()
             return {"verify_certs": True, "ca_certs": pem_tmp.name}
         except Exception:
-            # fallback: verifica sem CA explícito (pode falhar)
             return {"verify_certs": True}
-    # sem CA fornecido; tenta verificar usando trust store do SO
+
+    # tenta trust store do SO
     return {"verify_certs": True}
 
 
@@ -41,15 +39,13 @@ def create_es_client() -> Elasticsearch:
     url = os.getenv("ES_URL")
     user = os.getenv("ES_USER")
     pwd = os.getenv("ES_PASS")
-
     if not url or not user or not pwd:
         raise RuntimeError("ES_URL/ES_USER/ES_PASS não configurados na .env")
 
     tls_kwargs = _resolve_tls_kwargs()
 
-    # Você pode passar a URL completa (https://host:port) em hosts=[url]
     return Elasticsearch(
-        hosts=[url],
+        hosts=[url],               # URL completa: https://host:port
         basic_auth=(user, pwd),
         request_timeout=60,
         **tls_kwargs,
@@ -64,11 +60,12 @@ def create_embeddings() -> HuggingFaceEmbeddings:
 def create_vector_store(
     es_client: Elasticsearch,
     embeddings: HuggingFaceEmbeddings,
+    index_name: str,
 ) -> Tuple[ElasticsearchStore, str]:
-    index_name = os.getenv("ES_INDEX", "your_index_name")
+    """Cria um VectorStore para o índice informado."""
     store = ElasticsearchStore(
         embedding=embeddings,
         index_name=index_name,
-        es_connection=es_client,  # compat com versões antigas do langchain-elasticsearch
+        es_connection=es_client,   # compat com versões antigas do pacote
     )
     return store, index_name

@@ -13,10 +13,15 @@ from vector_store.elastic_search import (
     create_vector_store,
 )
 
-# ===== util =====
+# ===== utils =====
 def batched(seq: List, size: int) -> Iterable[List]:
     for i in range(0, len(seq), size):
         yield seq[i : i + size]
+
+def list_overlay_dirs(base: Path) -> List[Path]:
+    """Lista subdiretórios imediatos em base (cada um vira um índice)."""
+    return sorted([p for p in base.iterdir() if p.is_dir()])
+
 
 # ===== loaders =====
 def read_pdf(file_path: Path) -> List[Tuple[str, Dict]]:
@@ -52,12 +57,12 @@ def read_json(file_path: Path) -> List[Tuple[str, Dict]]:
             chunks.append((text, {"source": str(file_path)}))
     return chunks
 
-def load_documents(base_dir: str) -> List[Tuple[str, Dict]]:
-    base = Path(base_dir)
-    if not base.exists():
-        raise FileNotFoundError(f"Diretório não encontrado: {base_dir}")
+def load_documents(dir_path: Path) -> List[Tuple[str, Dict]]:
+    """Carrega documentos de UM overlay (dir_path)."""
     pairs: List[Tuple[str, Dict]] = []
-    for fp in base.rglob("*"):
+    if not dir_path.exists():
+        return pairs
+    for fp in dir_path.rglob("*"):
         if not fp.is_file():
             continue
         sfx = fp.suffix.lower()
@@ -72,29 +77,22 @@ def load_documents(base_dir: str) -> List[Tuple[str, Dict]]:
             print(f"[WARN] Falha ao ler {fp}: {e}")
     return pairs
 
+
 # ===== pipeline =====
 def main():
-    load_dotenv()  # carrega .env
+    load_dotenv()  # lê .env
 
-    docs_dir = os.getenv("DOCS_DIR", "adk-project/ingest/data/docs")
+    # Base com overlays (cada subpasta = índice)
+    base_dir = Path(os.getenv("DATA_BASE_DIR", "adk-project/ingest/data")).resolve()
     batch_size = int(os.getenv("BATCH_SIZE", "128"))
 
-    print("Carregando documentos...")
-    pairs = load_documents(docs_dir)
-    print(f"Arquivos carregados (após parsing): {len(pairs)}")
+    if not base_dir.exists():
+        raise FileNotFoundError(f"Base de dados não existe: {base_dir}")
 
-    splitter = build_text_splitter()
-
-    print("Gerando chunks...")
-    texts: List[str] = []
-    metas: List[Dict] = []
-    for text, meta in pairs:
-        for chunk in splitter.split_text(text):
-            texts.append(chunk)
-            metas.append(meta)
-
-    total = len(texts)
-    print(f"Total de chunks: {total}")
+    overlay_dirs = list_overlay_dirs(base_dir)
+    if not overlay_dirs:
+        print(f"Nenhum overlay encontrado em {base_dir}. Crie subpastas (ex.: hipoteses, diretrizes).")
+        return
 
     print("Criando embeddings (HuggingFace)...")
     embeddings = create_embeddings()
@@ -107,19 +105,46 @@ def main():
     except Exception as e:
         print(f"[WARN] es_client.info(): {e}")
 
-    print("Criando VectorStore...")
-    store, index_name = create_vector_store(es_client, embeddings)
+    splitter = build_text_splitter()
 
-    print(f"Ingerindo em lotes de {batch_size}...")
-    inserted = 0
-    for t_batch, m_batch in zip(batched(texts, batch_size), batched(metas, batch_size)):
-        store.add_texts(texts=t_batch, metadatas=m_batch)
-        inserted += len(t_batch)
-        if inserted % (batch_size * 5) == 0 or inserted == total:
-            print(f"Inseridos: {inserted}/{total}")
+    # === loop por overlay/índice ===
+    for overlay_dir in overlay_dirs:
+        index_name = overlay_dir.name  # nome do índice = nome da pasta
+        print(f"\n==== Overlay: {overlay_dir}  ->  Index: '{index_name}' ====")
 
-    es_client.indices.refresh(index=index_name)
-    print(f"OK! Index '{index_name}' populado com {inserted} chunks.")
+        pairs = load_documents(overlay_dir)
+        print(f"Arquivos carregados (após parsing): {len(pairs)}")
+
+        if not pairs:
+            print("Nada para ingerir; pulando...")
+            continue
+
+        # chunking
+        texts: List[str] = []
+        metas: List[Dict] = []
+        for text, meta in pairs:
+            for chunk in splitter.split_text(text):
+                texts.append(chunk)
+                metas.append(meta)
+
+        total = len(texts)
+        print(f"Total de chunks para '{index_name}': {total}")
+
+        # vectorstore para ESTE índice
+        store, _ = create_vector_store(es_client, embeddings, index_name)
+
+        print(f"Ingerindo '{index_name}' em lotes de {batch_size}...")
+        inserted = 0
+        for t_batch, m_batch in zip(batched(texts, batch_size), batched(metas, batch_size)):
+            store.add_texts(texts=t_batch, metadatas=m_batch)
+            inserted += len(t_batch)
+            if inserted % (batch_size * 5) == 0 or inserted == total:
+                print(f"[{index_name}] Inseridos: {inserted}/{total}")
+
+        es_client.indices.refresh(index=index_name)
+        print(f"[OK] Index '{index_name}' populado com {inserted} chunks.")
+
+    print("\nTudo pronto! 🎉")
 
 
 if __name__ == "__main__":
